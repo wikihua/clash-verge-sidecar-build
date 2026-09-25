@@ -1,0 +1,136 @@
+name: Build 2.5.5 Sidecar Fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 180
+
+    defaults:
+      run:
+        shell: pwsh
+
+    env:
+      CI: "true"
+      HUSKY: "0"
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      NODE_OPTIONS: "--max-old-space-size=4096"
+
+    steps:
+      - name: Get official v2.5.5 source
+        uses: actions/checkout@v7
+        with:
+          repository: clash-verge-rev/clash-verge-rev
+          ref: refs/tags/v2.5.5
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: sidecar-fix-255-windows-x64
+
+      - name: Apply administrator Sidecar fix
+        run: |
+          @'
+          const fs = require('node:fs');
+          const version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
+          if (version !== '2.5.5') {
+            throw new Error('Expected version 2.5.5, got ' + version);
+          }
+
+          const file = 'src-tauri/src/core/manager/lifecycle.rs';
+          const text = fs.readFileSync(file, 'utf8');
+          const oldLine = '        let service_required = Config::verge().await.latest_arc().enable_tun_mode.unwrap_or(false);';
+          const matches = text.split(oldLine).length - 1;
+          if (matches !== 1) {
+            throw new Error('Patch anchor must match exactly once; found ' + matches);
+          }
+
+          const newline = text.includes('\r\n') ? '\r\n' : '\n';
+          const replacement = [
+            oldLine,
+            '        #[cfg(target_os = "windows")]',
+            '        let service_required =',
+            '            service_required && !is_current_app_handle_admin(Handle::app_handle());',
+          ].join(newline);
+
+          fs.writeFileSync(file, text.replace(oldLine, replacement), 'utf8');
+          console.log('Applied administrator Sidecar fix to official v2.5.5.');
+          '@ | node --input-type=commonjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff -- src-tauri/src/core/manager/lifecycle.rs
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare build resources
+        run: pnpm run prebuild x86_64-pc-windows-msvc
+
+      - name: Build main executable without installer
+        run: pnpm exec tauri build --target x86_64-pc-windows-msvc --no-bundle -- --locked
+
+      - name: Collect executable and build record
+        run: |
+          $exe = "target/x86_64-pc-windows-msvc/release/clash-verge.exe"
+          if (!(Test-Path $exe)) { throw "Built executable not found: $exe" }
+          New-Item -ItemType Directory -Path out -Force | Out-Null
+          Copy-Item $exe out/clash-verge.exe
+
+          git diff --binary --output=out/sidecar-admin.patch -- src-tauri/src/core/manager/lifecycle.rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git archive --format=zip --output=out/upstream-v2.5.5-source.zip HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $commit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash out/clash-verge.exe -Algorithm SHA256).Hash
+          $runUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          @(
+            "UNOFFICIAL PERSONAL BUILD - NOT AN OFFICIAL RELEASE"
+            "Upstream: clash-verge-rev/clash-verge-rev"
+            "Base tag: v2.5.5"
+            "Source commit: $commit"
+            "Target: x86_64-pc-windows-msvc"
+            "Patch: sidecar-admin.patch"
+            "Build run: $runUrl"
+            "Workflow commit: $env:GITHUB_SHA"
+            "SHA256 clash-verge.exe: $hash"
+            "Use only in an existing official 2.5.5 Windows x64 installation."
+            "This EXE is not a standalone portable package."
+            "Back up the original EXE and configuration before replacing it."
+            "Source: upstream-v2.5.5-source.zip plus sidecar-admin.patch."
+          ) | Set-Content out/BUILD-INFO.txt -Encoding utf8
+          Get-Content out/BUILD-INFO.txt
+
+      - name: Upload download package
+        uses: actions/upload-artifact@v7
+        with:
+          name: clash-verge-2.5.5-sidecar-fix-windows-x64
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
