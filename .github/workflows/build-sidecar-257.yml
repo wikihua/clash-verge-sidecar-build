@@ -94,3 +94,43 @@ jobs:
 
       - name: Build main executable without installer
         run: pnpm exec tauri build --target x86_64-pc-windows-msvc --no-bundle -- --locked
+
+      - name: Collect executable and build record
+        run: |
+          $exe = "target/x86_64-pc-windows-msvc/release/clash-verge.exe"
+          if (!(Test-Path $exe)) { throw "Built executable not found: $exe" }
+          New-Item -ItemType Directory -Path out -Force | Out-Null
+          Copy-Item $exe out/clash-verge.exe
+
+          git diff --binary --output=out/sidecar-admin.patch -- src-tauri/src/core/manager/lifecycle.rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git archive --format=zip --output=out/upstream-v2.5.7-source.zip HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $commit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash out/clash-verge.exe -Algorithm SHA256).Hash
+          $runUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          @(
+            "UNOFFICIAL PERSONAL BUILD - NOT AN OFFICIAL RELEASE"
+            "Upstream: clash-verge-rev/clash-verge-rev"
+            "Base tag: v2.5.7"
+            "Source commit: $commit"
+            "Target: x86_64-pc-windows-msvc"
+            "Patch: sidecar-admin.patch"
+            "Build run: $runUrl"
+            "Workflow commit: $env:GITHUB_SHA"
+            "SHA256 clash-verge.exe: $hash"
+            "Use only in an existing official 2.5.7 Windows x64 installation."
+            "This EXE is not a standalone portable package."
+            "Back up the original EXE and configuration before replacing it."
+            "Source: upstream-v2.5.7-source.zip plus sidecar-admin.patch."
+          ) | Set-Content out/BUILD-INFO.txt -Encoding utf8
+          Get-Content out/BUILD-INFO.txt
+
+      - name: Upload download package
+        uses: actions/upload-artifact@v7
+        with:
+          name: clash-verge-2.5.7-sidecar-fix-windows-x64
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
